@@ -1080,12 +1080,27 @@ impl Lanes {
 /// A sprint lane: the sprint's name over its rows (or a place in the empty run). Returns the index (within
 /// `rows`) clicked this frame.
 #[allow(clippy::too_many_arguments)]
-fn sprint_block(ui: &mut Ui, p: &Palette, lanes: &mut Lanes, name: &str, salt: &str, rows: &[jira::Issue], offset: usize, cursor: usize) -> Option<usize> {
+fn sprint_block(
+    ui: &mut Ui,
+    p: &Palette,
+    lanes: &mut Lanes,
+    name: &str,
+    salt: &str,
+    rows: &[jira::Issue],
+    offset: usize,
+    cursor: usize,
+    moved: bool,
+) -> Option<usize> {
     let mut clicked = None;
     lanes.lane(ui, p, name, rows.len());
     for (idx, i) in rows.iter().enumerate() {
-        if ticket_row(ui, p, salt, i, offset + idx == cursor, idx, rows.len(), None, &[]).clicked() {
+        let sel = offset + idx == cursor;
+        let resp = ticket_row(ui, p, salt, i, sel, idx, rows.len(), None, &[]);
+        if resp.clicked() {
             clicked = Some(idx);
+        }
+        if sel && moved {
+            resp.scroll_to_me(None);
         }
     }
     clicked
@@ -1210,17 +1225,23 @@ fn epic_queue(app: &mut App, ui: &mut Ui, p: &Palette, view: &QueueView, cursor:
     let common_age = common_value(ages.iter().map(String::as_str));
     let common_assignee = common_value(candidates().map(assignee_name));
     let pills = RowPills { report: report.as_ref(), today, common_age, common_assignee, status_colors: &status_colors };
+    // The queue follows the cursor only when it lands somewhere new (another row, epic or placement slot), so
+    // a mouse-wheel scroll is not undone every frame; the same scheme as the pre-check list.
+    let last_id = egui::Id::new("groom-session-last-cursor");
+    let now = (app.grooming.epic_index, cursor, placement);
+    let moved = ui.data(|d| d.get_temp::<(usize, usize, Option<usize>)>(last_id)) != Some(now);
+    ui.data_mut(|d| d.insert_temp(last_id, now));
     crate::views::no_scroll_fade(ui);
     let out = egui::ScrollArea::vertical().id_salt("groom-queue").auto_shrink([false, false]).show(ui, |ui| {
         let mut lanes = Lanes::default();
         if let Some(name) = &view.active
-            && let Some(at) = sprint_block(ui, p, &mut lanes, name, "groom-sprint", &view.sprint, 0, cursor)
+            && let Some(at) = sprint_block(ui, p, &mut lanes, name, "groom-sprint", &view.sprint, 0, cursor, moved)
             && free
         {
             clicked = Some(at);
         }
         if let Some(name) = &view.next
-            && let Some(at) = sprint_block(ui, p, &mut lanes, name, "groom-next", &view.next_sprint, view.sprint.len(), cursor)
+            && let Some(at) = sprint_block(ui, p, &mut lanes, name, "groom-next", &view.next_sprint, view.sprint.len(), cursor, moved)
             && free
         {
             clicked = Some(view.sprint.len() + at);
@@ -1233,7 +1254,10 @@ fn epic_queue(app: &mut App, ui: &mut Ui, p: &Palette, view: &QueueView, cursor:
             if placement == Some(at)
                 && let Some(c) = view.planning.iter().chain(&view.new).nth(cursor.saturating_sub(lead + ready.len()))
             {
-                ghost_row(ui, p, c);
+                let resp = ghost_row(ui, p, c);
+                if moved {
+                    resp.scroll_to_me(None);
+                }
                 row += 1;
             }
             if let Some(i) = ready.get(at) {
@@ -1241,6 +1265,9 @@ fn epic_queue(app: &mut App, ui: &mut Ui, p: &Palette, view: &QueueView, cursor:
                 let resp = ticket_row(ui, p, "groom-ready", i, sel, row, rows, None, &[]);
                 if resp.clicked() && free {
                     clicked = Some(lead + at);
+                }
+                if sel && moved {
+                    resp.scroll_to_me(None);
                 }
                 row += 1;
             }
@@ -1262,6 +1289,9 @@ fn epic_queue(app: &mut App, ui: &mut Ui, p: &Palette, view: &QueueView, cursor:
                 let resp = candidate_row(ui, p, salt, i, idx, list.len(), sel, here, unclaimed, elapsed, &pills);
                 if resp.clicked() && free {
                     clicked = Some(offset + idx);
+                }
+                if sel && moved {
+                    resp.scroll_to_me(None);
                 }
                 if here && !unclaimed && app.grooming.bounce_text.is_some() {
                     let item = ui.style().spacing.item_spacing.y;
@@ -1289,7 +1319,7 @@ const GHOST_DASH_GAP: f32 = 3.0;
 
 /// Where the accepted ticket would land: a drop target, not a selection. No fill (the page shows through), a dashed
 /// accent outline, and the line saying what Enter does.
-fn ghost_row(ui: &mut Ui, p: &Palette, c: &jira::Issue) {
+fn ghost_row(ui: &mut Ui, p: &Palette, c: &jira::Issue) -> egui::Response {
     let r = Frame::new().inner_margin(row_pad(ui)).outer_margin(Margin::symmetric(0, 1)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         title_line(ui, p, &c.key, &c.summary, false, None);
@@ -1300,6 +1330,7 @@ fn ghost_row(ui: &mut Ui, p: &Palette, c: &jira::Issue) {
     let stroke = Stroke::new(1.0, p.selection_edge());
     let pts = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
     ui.painter().extend(egui::Shape::dashed_line(&pts, stroke, GHOST_DASH, GHOST_DASH_GAP));
+    r.response
 }
 
 /// The bounce comment box, under the focused candidate.
@@ -1804,5 +1835,63 @@ mod tests {
         let shapes = crate::testutil::paint_at2(egui::vec2(1200.0, 800.0), |ui| show(&mut app, ui));
         let t: Vec<String> = crate::testutil::inks(&shapes).into_iter().map(|(t, _)| t).collect();
         assert!(t.iter().any(|x| x == "Nothing Proposed or New here. Run a pre-check first, or pick another epic with ]."), "{t:?}");
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+    use crate::app::App;
+
+    fn long_session_app() -> App {
+        let cfg: crate::config::Config = toml::from_str("site = \"https://x.atlassian.net\"\nemail = \"a@b.c\"\n").unwrap();
+        let mut app = App::for_test(cfg, None);
+        let issue = |k: String, st: &str| crate::jira::Issue {
+            summary: format!("Summary {k}"),
+            key: k,
+            labels: vec!["PLAT".into()],
+            status: crate::jira::Status { name: st.into(), category: "new".into() },
+            parent_key: Some("CI-1860".into()),
+            parent_summary: Some("Blue Green Ops".into()),
+            ..Default::default()
+        };
+        let mut team: Vec<_> = (1..=40).map(|n| issue(format!("CI-{n}"), "Ready for Work")).collect();
+        team.push(issue("CI-99".into(), "New"));
+        app.store.absorb(crate::store::ListId::TeamOpen, team);
+        app.grooming.mode = GroomMode::Session;
+        app.grooming.focused_since = Some(std::time::Instant::now());
+        app
+    }
+
+    /// The queue rows on screen at 1400×900 after `moves` (frame → cursor) land on one context: egui paints only
+    /// the rows inside the scroll area's viewport, so a painted key is a row on screen. The focused ticket's pane
+    /// repeats the key to the right of the queue, so only inks in the queue column count. The cursor moves on a
+    /// later frame, as in the app, since the first frame of a fresh context has no font sizes yet; 20 frames after
+    /// the last move let the scroll animation (at most 0.3 s at 60 fps) finish.
+    fn queue_keys(app: &mut App, moves: &[(usize, usize)]) -> Vec<String> {
+        let frames = moves.iter().map(|(f, _)| f).max().copied().unwrap_or(0) + 20;
+        let mut frame = 0;
+        let shapes = crate::testutil::paint_frames_at2(egui::vec2(1400.0, 900.0), frames, |ui| {
+            frame += 1;
+            if let Some((_, to)) = moves.iter().find(|(f, _)| *f == frame) {
+                app.grooming.cursor = *to;
+            }
+            show(app, ui);
+        });
+        crate::testutil::inks(&shapes).into_iter().filter(|(t, r)| t.starts_with("CI-") && r.left() < 700.0).map(|(t, _)| t).collect()
+    }
+
+    #[test]
+    fn the_queue_scrolls_to_the_focused_row() {
+        let mut app = long_session_app();
+        // The list overflows: the last Ready row and the candidate are below the window while the first is focused.
+        let top = queue_keys(&mut app, &[]);
+        assert!(top.iter().any(|k| k == "CI-1") && !top.iter().any(|k| k == "CI-40" || k == "CI-99"), "{top:?}");
+        // j/k down to the candidate under the 40 Ready rows: the queue scrolls so the focused row shows.
+        let down = queue_keys(&mut app, &[(5, 40)]);
+        assert!(down.iter().any(|k| k == "CI-99") && !down.iter().any(|k| k == "CI-1"), "{down:?}");
+        // Back to the top: the first row comes back into view.
+        let back = queue_keys(&mut app, &[(5, 40), (30, 0)]);
+        assert!(back.iter().any(|k| k == "CI-1") && !back.iter().any(|k| k == "CI-99"), "{back:?}");
     }
 }

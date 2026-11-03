@@ -86,14 +86,20 @@ pub mod testutil {
 
     /// Paints `f` headless at the captures' 2 px per point with the app's theme and fonts, and returns the last
     /// pass's shapes (three passes, so fonts, density and sizes settle). Measure with `inks`, `ink_of` and `fills`.
-    pub fn paint_at2(size: egui::Vec2, mut f: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
+    pub fn paint_at2(size: egui::Vec2, f: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
+        paint_frames_at2(size, 3, f)
+    }
+
+    /// `paint_at2` over `frames` frames of one context. Without a clock in the input egui advances 1/60 s a
+    /// frame, so 30 frames let a scroll-to animation (at most 0.3 s) finish.
+    pub fn paint_frames_at2(size: egui::Vec2, frames: usize, mut f: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         ctx.set_pixels_per_point(2.0);
         // A focused window, so focused fields paint their caret.
         let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), focused: true, ..Default::default() };
         let mut shapes = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..frames {
             let mut o = ctx.run_ui(input(), &mut f);
             o.textures_delta.clear();
             shapes = o.shapes;
