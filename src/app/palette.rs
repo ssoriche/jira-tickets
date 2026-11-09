@@ -22,7 +22,27 @@ impl App {
         let Some(pal) = &self.palette else { return Vec::new() };
         let q = pal.query.trim();
         let remote: &[String] = if pal.remote_for.as_deref() == Some(q) { &pal.remote } else { &[] };
-        palette::hits(q, &self.cfg.scope.project, &self.cfg.scope.projects, &self.store.issues, remote)
+        let mut hits = palette::hits(q, &self.cfg.scope.project, &self.cfg.scope.projects, &self.store.issues, remote);
+        if let Some(gone) = &pal.missing {
+            hits.retain(|h| !matches!(h, Hit::Issue { key, .. } if key == gone));
+        }
+        hits
+    }
+
+    /// Jira is being asked for the current query, or will be once the debounce passes: the footer says
+    /// "Searching Jira…" from the first keystroke, not only once the request leaves.
+    pub fn palette_searching(&self) -> bool {
+        let Some(pal) = &self.palette else { return false };
+        if pal.pending {
+            return true;
+        }
+        let q = pal.query.trim();
+        let (project, projects) = (&self.cfg.scope.project, &self.cfg.scope.projects);
+        let asks = match palette::shorthand(q, project, projects) {
+            Some(k) => !self.store.issues.contains_key(&k),
+            None => palette::remote_term(q, project, projects).is_some(),
+        };
+        self.client.is_some() && asks && pal.sent.as_deref() != Some(q)
     }
 
     /// Each frame with the palette open: once the query has sat still for the debounce, ask Jira for it (once
@@ -50,6 +70,7 @@ impl App {
         let Some(pal) = self.palette.as_mut() else { return };
         pal.sent = Some(q.clone());
         pal.error = None;
+        pal.missing = None;
         // Without a client nothing is spawned, so nothing would ever clear `pending`.
         pal.pending = remote.is_some() && client;
         let Some(remote) = remote.filter(|_| client) else { return };
@@ -65,6 +86,7 @@ impl App {
     /// Jira answered a palette query: its issues join the cache (a cached one is kept, since it may hold the
     /// detail), and its keys list under the cached matches while the query is unchanged.
     pub(super) fn palette_answer(&mut self, seq: u64, query: String, result: jira::Result<Vec<jira::Issue>>) {
+        let project = (self.cfg.scope.project.clone(), self.cfg.scope.projects.clone());
         if seq != self.palette_seq {
             return;
         }
@@ -77,6 +99,11 @@ impl App {
                 for i in issues {
                     self.store.issues.entry(i.key.clone()).or_insert(i);
                 }
+            }
+            Err(e) if not_found(&e) => {
+                let key = palette::shorthand(&query, &project.0, &project.1);
+                pal.error = key.as_ref().map(|k| format!("Jira has no {k}. Check the number, or type words from its title."));
+                pal.missing = key;
             }
             Err(e) => pal.error = Some(palette_error(&e)),
         }
@@ -114,12 +141,13 @@ fn command_action(c: Command) -> Action {
     }
 }
 
+fn not_found(e: &jira::Error) -> bool {
+    e.to_string().contains("returned 404")
+}
+
 /// A failed palette search, short: the footer has one line.
 fn palette_error(e: &jira::Error) -> String {
-    match e.to_string() {
-        s if s.contains("returned 404") => "Jira has no such issue.".to_string(),
-        s => format!("Jira search failed: {}", s.lines().next().unwrap_or_default()),
-    }
+    format!("Jira search failed: {}", e.to_string().lines().next().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -196,6 +224,25 @@ mod tests {
         open(&mut app, "CI-5");
         app.palette_confirm(true, &ctx);
         assert!(matches!(app.actions.as_slice(), [Action::OpenUrl(u)] if u == "https://x.atlassian.net/browse/CI-5"));
+    }
+
+    #[test]
+    fn a_key_jira_does_not_have_drops_its_row() {
+        let mut app = App::for_test(cfg(), None);
+        open(&mut app, "9999");
+        app.palette_seq = 1;
+        app.palette_answer(1, "9999".into(), Err(jira::Error::Other("Jira returned 404: Issue does not exist".into())));
+        assert!(app.palette_hits().is_empty());
+        assert_eq!(app.palette.as_ref().unwrap().error.as_deref(), Some("Jira has no CI-9999. Check the number, or type words from its title."));
+    }
+
+    #[test]
+    fn searching_shows_from_the_first_keystroke() {
+        let mut app = App::for_test(cfg(), None);
+        open(&mut app, "disk");
+        assert!(!app.palette_searching(), "no client: nothing will be asked");
+        app.palette.as_mut().unwrap().pending = true;
+        assert!(app.palette_searching());
     }
 
     #[test]

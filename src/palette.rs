@@ -138,8 +138,8 @@ pub fn score(issue: &Issue, words: &[String]) -> Option<u32> {
     Some(total)
 }
 
-/// The palette's rows for `query`, best first: the ticket a shorthand names, matching commands, the cached
-/// tickets that match (best score, then most recently updated), then what Jira's full-text search found that
+/// The palette's rows for `query`, best first: the ticket a shorthand names, the cached tickets that match
+/// (best score, then most recently updated) with matching commands after them (before them when none match), then what Jira's full-text search found that
 /// the cache did not (`remote`, in Jira's order). An empty query lists the most recently updated tickets; `>`
 /// lists the commands only.
 pub fn hits(query: &str, project: &str, projects: &[String], issues: &HashMap<String, Issue>, remote: &[String]) -> Vec<Hit> {
@@ -160,13 +160,23 @@ pub fn hits(query: &str, project: &str, projects: &[String], issues: &HashMap<St
         out.push(Hit::Issue { key: k.clone(), text_only: false });
     }
     let w = words(q);
-    if q.chars().count() >= 2 {
-        out.extend(COMMANDS.iter().filter(|(_, name, _)| command_matches(name, &w)).map(|(c, _, _)| Hit::Command(*c)));
-    }
+    let commands: Vec<Hit> = if q.chars().count() >= 2 {
+        COMMANDS.iter().filter(|(_, name, _)| command_matches(name, &w)).map(|(c, _, _)| Hit::Command(*c)).collect()
+    } else {
+        Vec::new()
+    };
     let mut scored: Vec<(u32, &Issue)> = issues.values().filter(|i| Some(&i.key) != exact.as_ref()).filter_map(|i| score(i, &w).map(|s| (s, i))).collect();
     scored.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then_with(|| b.updated.cmp(&a.updated)).then_with(|| a.key.cmp(&b.key)));
     let listed: Vec<String> = scored.iter().map(|(_, i)| i.key.clone()).collect();
+    // A command leads only when no ticket matches ("groo"); otherwise it follows them, so Enter on a common
+    // word ("the") opens a ticket rather than running "Switch theme".
+    if exact.is_none() && listed.is_empty() {
+        out.extend(commands.iter().cloned());
+    }
     out.extend(listed.iter().map(|k| Hit::Issue { key: k.clone(), text_only: false }));
+    if exact.is_some() || !listed.is_empty() {
+        out.extend(commands);
+    }
     for k in remote {
         if Some(k) != exact.as_ref() && !listed.contains(k) {
             out.push(Hit::Issue { key: k.clone(), text_only: true });
@@ -266,6 +276,9 @@ mod tests {
         assert_eq!(keys(&hits("disk", "PRS", &projects(), &c, &["PRS-3".into(), "PRS-1".into(), "PRS-9".into()])), ["PRS-2", "PRS-1", "PRS-3*", "PRS-9*"]);
         assert_eq!(keys(&hits("3", "PRS", &projects(), &c, &[])), ["PRS-3"]);
         assert_eq!(keys(&hits("groo", "PRS", &projects(), &c, &[])), ["Go to Grooming"]);
+        assert_eq!(keys(&hits("grow", "PRS", &projects(), &c, &[])), ["PRS-1"]);
+        let t = cache(&[issue("PRS-7", "Update the theme docs", "")]);
+        assert_eq!(keys(&hits("theme", "PRS", &projects(), &t, &[])), ["PRS-7", "Switch theme"], "a ticket match leads");
         assert_eq!(keys(&hits("", "PRS", &projects(), &c, &[])), ["PRS-3", "PRS-2", "PRS-1"], "empty: most recently updated");
         assert_eq!(keys(&hits("> them", "PRS", &projects(), &c, &[])), ["Switch theme"]);
         assert_eq!(hits(">", "PRS", &projects(), &c, &[]).len(), COMMANDS.len());

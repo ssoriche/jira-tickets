@@ -285,7 +285,7 @@ pub fn hints_panel(app: &App, ui: &mut Ui, p: &Palette) {
     let focus = text_focus(ui, app);
     let c = crate::keys::hint_context(crate::keys::HintState {
         help_open: app.help_open,
-        palette_open: app.palette.is_some(),
+        palette: super::palette::hint(app),
         picker: edit,
         has_selection: app.selected.is_some(),
         focus,

@@ -149,7 +149,12 @@ pub type Hint = &'static [Tok];
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HintContext {
     Help,
+    /// The palette with a ticket under the cursor.
     Palette,
+    /// The palette with a command under the cursor: Enter runs it, and there is no Jira page to open.
+    PaletteCommand,
+    /// The palette with no rows: only Esc does something.
+    PaletteEmpty,
     /// The search box has focus and Esc would clear it (text, or a search showing).
     Search,
     /// The search box has focus and holds plain text (already filtered and text-searched); Enter runs it as JQL.
@@ -232,6 +237,15 @@ pub enum GroomHint {
     Bounce,
 }
 
+/// What is under the palette's cursor, for the hint bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaletteHint {
+    Ticket,
+    Command,
+    /// No rows.
+    Empty,
+}
+
 /// Which kind of picker is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PickerHint {
@@ -244,7 +258,8 @@ pub enum PickerHint {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct HintState {
     pub help_open: bool,
-    pub palette_open: bool,
+    /// The palette is open, and what its cursor is on.
+    pub palette: Option<PaletteHint>,
     pub picker: Option<PickerHint>,
     pub has_selection: bool,
     pub focus: Focus,
@@ -271,7 +286,7 @@ impl HintState {
     pub fn new(focus: Focus) -> Self {
         HintState {
             help_open: false,
-            palette_open: false,
+            palette: None,
             picker: None,
             has_selection: false,
             focus,
@@ -288,14 +303,16 @@ impl HintState {
 }
 
 pub fn hint_context(s: HintState) -> HintContext {
-    let HintState { help_open, palette_open, picker, has_selection, focus, search_shown, read_only, grooming, team, roadmap, me, standup, standup_cards } = s;
-    match (help_open, palette_open, picker) {
+    let HintState { help_open, palette, picker, has_selection, focus, search_shown, read_only, grooming, team, roadmap, me, standup, standup_cards } = s;
+    match (help_open, palette, picker) {
         (true, _, _) => HintContext::Help,
         // An open picker or the palette owns the bar on every screen, Grooming included.
         (_, _, Some(PickerHint::Edit)) => HintContext::EditPicker,
         (_, _, Some(PickerHint::Assign)) => HintContext::AssignPicker,
         (_, _, Some(PickerHint::Other)) => HintContext::Picker,
-        (_, true, None) => HintContext::Palette,
+        (_, Some(PaletteHint::Ticket), None) => HintContext::Palette,
+        (_, Some(PaletteHint::Command), None) => HintContext::PaletteCommand,
+        (_, Some(PaletteHint::Empty), None) => HintContext::PaletteEmpty,
         _ if grooming == Some(GroomHint::PreCheck) => HintContext::GroomPreCheck,
         _ if grooming == Some(GroomHint::Summary) && read_only => HintContext::GroomSummaryReadOnly,
         _ if grooming == Some(GroomHint::Summary) => HintContext::GroomSummary,
@@ -332,6 +349,8 @@ pub fn hints(c: HintContext) -> &'static [Hint] {
         // Alternatives are separate chips; a slash only joins an up/down pair.
         HintContext::Help => &[&[K("?"), W("or"), K("Esc"), W("close")]],
         HintContext::Palette => &[&[K("↑/↓"), W("move")], &[K("Enter"), W("open")], &[K("⌘Enter"), W("open in Jira")], &[K("Esc"), W("close")]],
+        HintContext::PaletteCommand => &[&[K("↑/↓"), W("move")], &[K("Enter"), W("run")], &[K("Esc"), W("close")]],
+        HintContext::PaletteEmpty => &[&[K("Esc"), W("close")]],
         HintContext::Search => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("clear")]],
         HintContext::SearchText => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("clear")]],
         HintContext::SearchEmpty => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("done")]],
@@ -590,7 +609,7 @@ mod tests {
     }
 
     fn st(help_open: bool, palette_open: bool, picker: Option<PickerHint>, has_selection: bool, focus: Focus) -> HintState {
-        HintState { help_open, palette_open, picker, has_selection, ..HintState::new(focus) }
+        HintState { help_open, palette: palette_open.then_some(PaletteHint::Ticket), picker, has_selection, ..HintState::new(focus) }
     }
 
     #[test]
@@ -735,7 +754,22 @@ mod tests {
         assert!(hint_text(&with_done_hint(Standup, standup, true)).ends_with("r run again · D move to Done · ? help"));
         // Nothing focused (an unadded Standup card, an empty Grooming list) or no ticket on screen: no D.
         assert_eq!(with(Team, false), hint_text(hints(Team)));
-        for c in [Browse, BrowseSearch, RoadmapView, StandupEmpty, StandupTitle, Search, Composer, Picker, EditPicker, Palette, Help, GroomSummary] {
+        for c in [
+            Browse,
+            BrowseSearch,
+            RoadmapView,
+            StandupEmpty,
+            StandupTitle,
+            Search,
+            Composer,
+            Picker,
+            EditPicker,
+            Palette,
+            PaletteCommand,
+            PaletteEmpty,
+            Help,
+            GroomSummary,
+        ] {
             assert_eq!(with(c, true), hint_text(hints(c)), "{c:?}");
         }
         assert!(BINDINGS.iter().any(|b| b.keys == "D" && b.group == Group::Global), "the hint names a bound key");
@@ -743,11 +777,28 @@ mod tests {
 
     #[test]
     fn an_open_picker_or_the_palette_owns_the_bar_on_grooming() {
-        let on_grooming = |picker, palette_open| HintState { picker, palette_open, grooming: Some(GroomHint::PreCheck), ..HintState::new(Focus::None) };
+        let on_grooming = |picker, palette_open: bool| HintState {
+            picker,
+            palette: palette_open.then_some(PaletteHint::Ticket),
+            grooming: Some(GroomHint::PreCheck),
+            ..HintState::new(Focus::None)
+        };
         assert_eq!(hint_context(on_grooming(Some(PickerHint::Other), false)), HintContext::Picker);
         assert_eq!(hint_context(on_grooming(Some(PickerHint::Edit), false)), HintContext::EditPicker);
         assert_eq!(hint_context(on_grooming(None, true)), HintContext::Palette);
         assert_eq!(hint_context(on_grooming(None, false)), HintContext::GroomPreCheck);
+    }
+
+    #[test]
+    fn the_palette_bar_follows_its_cursor_row() {
+        use HintContext::*;
+        let pal = |h| HintState { palette: Some(h), has_selection: true, ..HintState::new(Focus::OtherText) };
+        assert_eq!(hint_context(pal(PaletteHint::Ticket)), Palette);
+        assert_eq!(hint_context(pal(PaletteHint::Command)), PaletteCommand);
+        assert_eq!(hint_context(pal(PaletteHint::Empty)), PaletteEmpty);
+        assert_eq!(hint_context(HintState { help_open: true, ..pal(PaletteHint::Command) }), Help, "help still wins");
+        assert_eq!(hint_text(hints(PaletteCommand)), "↑/↓ move · Enter run · Esc close", "a command has no Jira page");
+        assert_eq!(hint_text(hints(PaletteEmpty)), "Esc close", "no rows: nothing to move to or open");
     }
 
     #[test]

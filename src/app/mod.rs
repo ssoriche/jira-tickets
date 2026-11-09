@@ -192,6 +192,8 @@ pub struct PaletteState {
     pub remote_for: Option<String>,
     /// A Jira search for the current query is in flight.
     pub pending: bool,
+    /// A shorthand key Jira answered it does not have: its row goes, and the footer says so.
+    pub missing: Option<String>,
     pub error: Option<String>,
 }
 
