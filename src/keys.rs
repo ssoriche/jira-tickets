@@ -49,11 +49,11 @@ pub const BINDINGS: &[KeyBinding] = &[
     b(Group::Global, "⌘W", "Close the window"),
     // Shift+D on every screen with a focused ticket; plain `d` stays Team's done footer.
     b(Group::Global, "D", "Move the focused ticket to Done"),
-    // Esc is global: it cancels a picker or the Edit bar and closes go-to (round 13 H3).
+    b(Group::Global, "⌘K", "Search tickets, open one by key or number, or run a command"),
+    // Esc is global: it cancels a picker or the Edit bar and closes the palette (round 13 H3).
     b(Group::Global, "Esc", "Cancel or close"),
     b(Group::Global, "?, Esc", "Close this help"),
-    // ⌘K and ⌘O are bound on the Issues screen only (`App::shortcuts`).
-    b(Group::Issues, "⌘K", "Go to an issue by key, number, or link"),
+    // ⌘O is bound on the Issues screen only (`App::shortcuts`).
     b(Group::Issues, "⌘O", "Open in Jira"),
     b(Group::Issues, "⌘F, /", "Focus search"),
     b(Group::Issues, "j/k, ↑/↓", "Next or previous issue"),
@@ -105,6 +105,7 @@ pub const BINDINGS: &[KeyBinding] = &[
     b(Group::Pickers, "j/k, ↑/↓", "Move"),
     b(Group::Pickers, "Tab/⇧Tab", "Next or previous field"),
     b(Group::Pickers, "Enter", "Confirm"),
+    b(Group::Pickers, "⌘Enter", "Open the ⌘K result in Jira"),
 ];
 
 /// The alternatives of one binding; each is one chip, or a range (see `range`).
@@ -148,7 +149,7 @@ pub type Hint = &'static [Tok];
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HintContext {
     Help,
-    GoTo,
+    Palette,
     /// The search box has focus and Esc would clear it (text, or a search showing).
     Search,
     /// The search box has focus and holds plain text (already filtered and text-searched); Enter runs it as JQL.
@@ -243,7 +244,7 @@ pub enum PickerHint {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct HintState {
     pub help_open: bool,
-    pub goto_open: bool,
+    pub palette_open: bool,
     pub picker: Option<PickerHint>,
     pub has_selection: bool,
     pub focus: Focus,
@@ -270,7 +271,7 @@ impl HintState {
     pub fn new(focus: Focus) -> Self {
         HintState {
             help_open: false,
-            goto_open: false,
+            palette_open: false,
             picker: None,
             has_selection: false,
             focus,
@@ -287,14 +288,14 @@ impl HintState {
 }
 
 pub fn hint_context(s: HintState) -> HintContext {
-    let HintState { help_open, goto_open, picker, has_selection, focus, search_shown, read_only, grooming, team, roadmap, me, standup, standup_cards } = s;
-    match (help_open, goto_open, picker) {
+    let HintState { help_open, palette_open, picker, has_selection, focus, search_shown, read_only, grooming, team, roadmap, me, standup, standup_cards } = s;
+    match (help_open, palette_open, picker) {
         (true, _, _) => HintContext::Help,
-        // An open picker or go-to box owns the bar on every screen, Grooming included.
+        // An open picker or the palette owns the bar on every screen, Grooming included.
         (_, _, Some(PickerHint::Edit)) => HintContext::EditPicker,
         (_, _, Some(PickerHint::Assign)) => HintContext::AssignPicker,
         (_, _, Some(PickerHint::Other)) => HintContext::Picker,
-        (_, true, None) => HintContext::GoTo,
+        (_, true, None) => HintContext::Palette,
         _ if grooming == Some(GroomHint::PreCheck) => HintContext::GroomPreCheck,
         _ if grooming == Some(GroomHint::Summary) && read_only => HintContext::GroomSummaryReadOnly,
         _ if grooming == Some(GroomHint::Summary) => HintContext::GroomSummary,
@@ -330,7 +331,7 @@ pub fn hints(c: HintContext) -> &'static [Hint] {
     match c {
         // Alternatives are separate chips; a slash only joins an up/down pair.
         HintContext::Help => &[&[K("?"), W("or"), K("Esc"), W("close")]],
-        HintContext::GoTo => &[&[K("Enter"), W("open")], &[K("Esc"), W("close")]],
+        HintContext::Palette => &[&[K("↑/↓"), W("move")], &[K("Enter"), W("open")], &[K("⌘Enter"), W("open in Jira")], &[K("Esc"), W("close")]],
         HintContext::Search => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("clear")]],
         HintContext::SearchText => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("clear")]],
         HintContext::SearchEmpty => &[&[K("Enter"), W("run as JQL")], &[K("Esc"), W("done")]],
@@ -564,17 +565,17 @@ mod tests {
         assert_eq!(range("⌘1 to ⌘6"), ["⌘1", "⌘6"]);
         assert_eq!(range("j/k"), ["j/k"]);
         assert!(t.contains("| `⌘F` or `/` | Focus search |\n"));
-        assert!(t.contains("| `⌘K` | Go to an issue by key, number, or link |\n"));
+        assert!(t.contains("| `⌘K` | Search tickets, open one by key or number, or run a command |\n"));
         assert!(t.contains("| `J/K` | Move a Ready for Work ticket down or up in rank |\n"));
         assert!(t.contains("| `j/k` or `↑/↓` | Move |\n"), "one alternatives order, no keys in prose");
         let global = BINDINGS.iter().filter(|k| k.group == Group::Global).count();
-        assert_eq!(global, 8, "only the keys that work on every screen live in Global (D included); ⌘K and ⌘O are Issues keys");
-        assert!(t.contains("| **Issues** | |\n| `⌘K` | Go to an issue by key, number, or link |\n| `⌘O` | Open in Jira |\n"));
+        assert_eq!(global, 9, "only the keys that work on every screen live in Global (D and ⌘K included); ⌘O is an Issues key");
+        assert!(t.contains("| **Issues** | |\n| `⌘O` | Open in Jira |\n"));
         assert!(t.contains("| `Esc` | Cancel or close |\n| `?` or `Esc` | Close this help |\n"), "Esc right above the help row");
         assert!(t.contains("| `?` or `Esc` | Close this help |\n| **Issues** | |\n"), "one help row, the last of Global");
         assert!(t.contains("| `J/K` | Move down or up in rank |\n"));
         assert!(t.contains("| `⌘Enter` | Post the comment |\n"));
-        assert!(!t.contains("Close the go-to box"), "the go-to bar shows its own Esc");
+        assert!(!t.contains("Close the palette"), "the palette shows its own Esc");
         assert!(t.contains("| `j/k` or `↑/↓` | Next or previous issue |\n"));
         assert!(t.contains("| **Grooming** | |\n| `j/k` or `↑/↓` | Next or previous ticket |\n| `r` | Ready |\n"));
         assert!(t.contains("| `Tab` | Switch between Pre-check and Session |\n| **Team** | |\n| `h/l` or `←/→` | Previous or next member |\n"));
@@ -588,8 +589,8 @@ mod tests {
         assert_eq!(t.matches("| **").count(), 8);
     }
 
-    fn st(help_open: bool, goto_open: bool, picker: Option<PickerHint>, has_selection: bool, focus: Focus) -> HintState {
-        HintState { help_open, goto_open, picker, has_selection, ..HintState::new(focus) }
+    fn st(help_open: bool, palette_open: bool, picker: Option<PickerHint>, has_selection: bool, focus: Focus) -> HintState {
+        HintState { help_open, palette_open, picker, has_selection, ..HintState::new(focus) }
     }
 
     #[test]
@@ -611,7 +612,7 @@ mod tests {
         );
         assert_eq!(hint_context(st(false, false, Some(PickerHint::Assign), true, Focus::OtherText)), AssignPicker);
         assert_eq!(hint_text(hints(AssignPicker)), "Type to filter · ↑/↓ move · Enter confirm · Esc cancel");
-        assert_eq!(hint_context(st(false, true, None, true, Focus::OtherText)), GoTo);
+        assert_eq!(hint_context(st(false, true, None, true, Focus::OtherText)), Palette);
         assert_eq!(hint_context(st(false, false, None, true, Focus::Search { clear: true, plain: false })), Search);
         assert_eq!(hint_context(st(false, false, None, true, Focus::Search { clear: true, plain: true })), SearchText);
         assert_eq!(hint_text(hints(SearchText)), "Enter run as JQL · Esc clear");
@@ -705,7 +706,7 @@ mod tests {
         for r in [StandupRun::Now, StandupRun::Again, StandupRun::Retry] {
             assert_eq!(hint_text(&[r.hint()]), format!("r {}", r.label().to_lowercase()), "the hint says the button's words");
         }
-        assert_eq!(hint_text(hints(GoTo)), "Enter open · Esc close");
+        assert_eq!(hint_text(hints(Palette)), "↑/↓ move · Enter open · ⌘Enter open in Jira · Esc close");
         assert_eq!(hint_text(hints(Search)), "Enter run as JQL · Esc clear", "one Enter wording for every search text");
         assert_eq!(hint_text(hints(EditPicker)), "Tab/⇧Tab next or previous field · Enter confirm · Esc cancel");
         assert_eq!(hint_text(hints(Picker)), "j/k or ↑/↓ move · Enter confirm · Esc cancel");
@@ -734,18 +735,18 @@ mod tests {
         assert!(hint_text(&with_done_hint(Standup, standup, true)).ends_with("r run again · D move to Done · ? help"));
         // Nothing focused (an unadded Standup card, an empty Grooming list) or no ticket on screen: no D.
         assert_eq!(with(Team, false), hint_text(hints(Team)));
-        for c in [Browse, BrowseSearch, RoadmapView, StandupEmpty, StandupTitle, Search, Composer, Picker, EditPicker, GoTo, Help, GroomSummary] {
+        for c in [Browse, BrowseSearch, RoadmapView, StandupEmpty, StandupTitle, Search, Composer, Picker, EditPicker, Palette, Help, GroomSummary] {
             assert_eq!(with(c, true), hint_text(hints(c)), "{c:?}");
         }
         assert!(BINDINGS.iter().any(|b| b.keys == "D" && b.group == Group::Global), "the hint names a bound key");
     }
 
     #[test]
-    fn an_open_picker_or_go_to_owns_the_bar_on_grooming() {
-        let on_grooming = |picker, goto_open| HintState { picker, goto_open, grooming: Some(GroomHint::PreCheck), ..HintState::new(Focus::None) };
+    fn an_open_picker_or_the_palette_owns_the_bar_on_grooming() {
+        let on_grooming = |picker, palette_open| HintState { picker, palette_open, grooming: Some(GroomHint::PreCheck), ..HintState::new(Focus::None) };
         assert_eq!(hint_context(on_grooming(Some(PickerHint::Other), false)), HintContext::Picker);
         assert_eq!(hint_context(on_grooming(Some(PickerHint::Edit), false)), HintContext::EditPicker);
-        assert_eq!(hint_context(on_grooming(None, true)), HintContext::GoTo);
+        assert_eq!(hint_context(on_grooming(None, true)), HintContext::Palette);
         assert_eq!(hint_context(on_grooming(None, false)), HintContext::GroomPreCheck);
     }
 

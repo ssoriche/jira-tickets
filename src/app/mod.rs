@@ -5,6 +5,7 @@ mod actions;
 mod groom;
 mod loads;
 mod msg;
+mod palette;
 mod pickers;
 mod shortcuts;
 mod standup;
@@ -175,6 +176,25 @@ pub struct PromoteRun {
     pub needs_detail: Vec<(String, Vec<crate::grooming::Code>)>,
 }
 
+/// The ⌘K palette's query, cursor, and the Jira search answering it.
+#[derive(Default)]
+pub struct PaletteState {
+    pub query: String,
+    pub cursor: usize,
+    /// The cursor moved by key, so its row scrolls into view on the next frame.
+    pub scroll: bool,
+    /// When the query last changed, for the debounce.
+    pub edited: Option<Instant>,
+    /// The query the last Jira search was sent for (or skipped for: too short, a command, a cached key).
+    pub sent: Option<String>,
+    /// What Jira's search for `remote_for` found, in its order.
+    pub remote: Vec<String>,
+    pub remote_for: Option<String>,
+    /// A Jira search for the current query is in flight.
+    pub pending: bool,
+    pub error: Option<String>,
+}
+
 pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
@@ -212,8 +232,10 @@ pub struct App {
     pub sprints_cached: bool,
     /// Set by ⌘F or `/`; the search box takes focus on its next frame.
     pub focus_search: bool,
-    /// The ⌘K box text while it is open.
-    pub goto: Option<String>,
+    /// The ⌘K palette while it is open, on any screen.
+    pub palette: Option<PaletteState>,
+    /// Bumped by every palette search sent; answers to older ones are dropped.
+    pub palette_seq: u64,
     /// Keyboard cursor: an index into the Issues view's current rows.
     pub cursor: usize,
     /// The cursor the list last drew; when it differs the row scrolls into view.
@@ -351,7 +373,8 @@ impl App {
             sprint_default_applied: false,
             sprints_answered: false,
             focus_search: false,
-            goto: None,
+            palette: None,
+            palette_seq: 0,
             cursor: 0,
             last_cursor: 0,
             search_active: false,
@@ -458,11 +481,11 @@ impl App {
 
     /// `D` (Shift+D, no other modifier) moves the screen's focused ticket to Done (`done_target`) on every screen.
     /// Checked before the screens' own keys, which would read Shift+D as a plain `d` (Team's done footer). Help,
-    /// an open picker or go-to box, a focused text field, and Grooming's open dialogs keep the key for themselves.
+    /// an open picker or the ⌘K palette, a focused text field, and Grooming's open dialogs keep the key for themselves.
     pub(super) fn done_shortcut(&mut self, ctx: &egui::Context) {
         let g = &self.grooming;
         let modal = g.pending_report.is_some() || g.summary_open || g.bounce_text.is_some() || g.placement.is_some();
-        let busy = self.help_open || self.picker.is_some() || self.goto.is_some() || (self.screen == Screen::Grooming && modal);
+        let busy = self.help_open || self.picker.is_some() || self.palette.is_some() || (self.screen == Screen::Grooming && modal);
         if busy || ctx.text_edit_focused() {
             return;
         }
@@ -679,7 +702,9 @@ impl eframe::App for App {
             self.track_screen_epics();
             views::main(self, ui);
             self.text_search_tick(&ctx);
+            self.palette_tick(&ctx);
             views::pickers::show(self, &ctx);
+            views::palette::show(self, &ctx);
             views::help::show(self, &ctx);
         } else {
             views::sign_in(self, ui);
@@ -742,12 +767,12 @@ mod tests {
     }
 
     #[test]
-    fn changing_screen_closes_go_to_and_the_summary() {
+    fn changing_screen_closes_the_palette_and_the_summary() {
         let mut app = App::for_test(cfg(), None);
         let ctx = egui::Context::default();
-        app.goto = Some("CI-".into());
+        app.palette = Some(PaletteState { query: "CI-".into(), ..Default::default() });
         app.apply(Action::SetScreen(Screen::Grooming), &ctx);
-        assert!(app.goto.is_none(), "the go-to box is drawn on Issues only");
+        assert!(app.palette.is_none(), "a new screen starts with the palette closed");
         app.grooming.summary_open = true;
         app.apply(Action::SetScreen(Screen::Grooming), &ctx);
         assert!(app.grooming.summary_open, "staying on the screen keeps it");

@@ -7,6 +7,27 @@ use crate::grooming::{Code, Verdict, bounce_comment_ok};
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 impl App {
+    /// The palette's keys: ↑/↓ (or ⌃N/⌃P) move, Enter opens, ⌘Enter opens in Jira, Esc closes. ⌘Enter is
+    /// read before Enter, which would also match it.
+    fn palette_shortcuts(&mut self, ctx: &egui::Context) {
+        let shortcut = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
+        if shortcut(Modifiers::NONE, Key::Escape) {
+            self.actions.push(Action::TogglePalette);
+            return;
+        }
+        if shortcut(Modifiers::NONE, Key::ArrowDown) || shortcut(Modifiers::CTRL, Key::N) {
+            self.actions.push(Action::PaletteMove(1));
+        }
+        if shortcut(Modifiers::NONE, Key::ArrowUp) || shortcut(Modifiers::CTRL, Key::P) {
+            self.actions.push(Action::PaletteMove(-1));
+        }
+        if shortcut(Modifiers::COMMAND, Key::Enter) {
+            self.actions.push(Action::PaletteConfirm { browser: true });
+        } else if shortcut(Modifiers::NONE, Key::Enter) {
+            self.actions.push(Action::PaletteConfirm { browser: false });
+        }
+    }
+
     pub(super) fn shortcuts(&mut self, ctx: &egui::Context) {
         let cmd = Modifiers::COMMAND;
         let screens = [
@@ -33,6 +54,16 @@ impl App {
             self.actions.push(Action::ToggleDensity);
         }
         let shortcut = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
+        // ⌘K on every screen, over help too; an open picker keeps the keyboard until it closes.
+        if self.picker.is_none() && shortcut(cmd, Key::K) {
+            self.actions.push(Action::TogglePalette);
+            return;
+        }
+        // The palette owns the keyboard while open; its field has focus, so letters type there.
+        if self.palette.is_some() {
+            self.palette_shortcuts(ctx);
+            return;
+        }
         // Help owns the keyboard while open, ahead of pickers and the Issues keys.
         if self.help_open {
             if shortcut(Modifiers::NONE, Key::Escape) || shortcut(Modifiers::NONE, Key::Questionmark) {
@@ -94,15 +125,6 @@ impl App {
             return;
         }
         if self.screen != Screen::Issues {
-            return;
-        }
-        if shortcut(cmd, Key::K) {
-            self.actions.push(Action::ToggleGoTo);
-        }
-        if self.goto.is_some() {
-            if shortcut(Modifiers::NONE, Key::Escape) {
-                self.goto = None;
-            }
             return;
         }
         if shortcut(cmd, Key::F) {

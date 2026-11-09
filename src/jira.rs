@@ -373,6 +373,12 @@ impl Client {
         Ok(self.search_raw(jql, fields, None, max_pages)?.iter().map(parse_issue).collect())
     }
 
+    /// The first `max` issues of a JQL search, in one request (the ⌘K palette's full-text search).
+    pub fn search_first(&self, jql: &str, fields: &[&str], max: usize) -> Result<Vec<Issue>> {
+        let v = self.send("POST", "/rest/api/3/search/jql", &json!({ "jql": jql, "fields": fields, "maxResults": max }))?;
+        Ok(v["issues"].as_array().map(Vec::as_slice).unwrap_or_default().iter().map(parse_issue).collect())
+    }
+
     /// Every page of a JQL search with each issue's changelog, as Jira's raw JSON (the Standup screen reads the
     /// status changes and comments out of it).
     pub fn search_with_changelog(&self, jql: &str, fields: &[&str]) -> Result<Vec<Value>> {
@@ -800,6 +806,17 @@ pub mod tests {
         assert!(first.get("nextPageToken").is_none());
         let second: serde_json::Value = serde_json::from_str(&rx.recv().unwrap().body).unwrap();
         assert_eq!(second["nextPageToken"], "t2");
+    }
+
+    #[test]
+    fn search_first_asks_for_one_short_page() {
+        let page = serde_json::json!({ "issues": fixture("search_page.json")["issues"], "nextPageToken": "t2" });
+        let (base, rx) = stub_server(vec![("POST", "/rest/api/3/search/jql", page)]);
+        let got = client(&base).search_first("text ~ \"disk*\"", &["summary"], 25).unwrap();
+        assert_eq!(got.len(), 2);
+        let body: serde_json::Value = serde_json::from_str(&rx.recv().unwrap().body).unwrap();
+        assert_eq!(body["maxResults"], 25);
+        assert!(rx.try_recv().is_err(), "one request, the next page is not followed");
     }
 
     #[test]

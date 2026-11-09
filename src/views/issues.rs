@@ -285,7 +285,7 @@ pub fn hints_panel(app: &App, ui: &mut Ui, p: &Palette) {
     let focus = text_focus(ui, app);
     let c = crate::keys::hint_context(crate::keys::HintState {
         help_open: app.help_open,
-        goto_open: app.goto.is_some(),
+        palette_open: app.palette.is_some(),
         picker: edit,
         has_selection: app.selected.is_some(),
         focus,
@@ -367,7 +367,6 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             super::detail::show(app, ui);
         });
-    goto_box(app, ui.ctx(), p);
 }
 
 /// Which text field holds the keyboard, for the hint bar.
@@ -1880,60 +1879,6 @@ const KEY_TO_WORD: f32 = 4.0;
 /// Space either side of the "·" between hints.
 const SEP_SPACE: f32 = 12.0;
 
-fn goto_box(app: &mut App, ctx: &egui::Context, p: &Palette) {
-    if app.goto.is_none() {
-        return;
-    }
-    // The standard modal backdrop: the box is an overlay, not a widget floating over the filters.
-    if crate::views::backdrop(ctx, "goto-backdrop", egui::Order::Middle, crate::views::hint_bar_height(app), p).clicked() {
-        app.goto = None;
-        return;
-    }
-    let top = crate::views::pickers::picker_top(ctx.content_rect().height(), app.detail_pills_top);
-    let project = app.cfg.scope.project.clone();
-    let Some(text) = app.goto.as_mut() else { return };
-    let mut go = false;
-    // The pickers' modal: same frame, width, anchor and title.
-    egui::Area::new(egui::Id::new("goto")).order(egui::Order::Foreground).anchor(egui::Align2::CENTER_TOP, vec2(0.0, top)).show(ctx, |ui| {
-        crate::views::components::dialog_frame(p).inner_margin(crate::views::pickers::DIALOG_MARGIN).show(ui, |ui| {
-            crate::views::dialog_fields(ui, p);
-            ui.set_width(crate::views::pickers::DIALOG_W);
-            crate::views::pickers::title(ui, p, GOTO_TITLE);
-            // Proportional 14 like the search box: mono is for rendered ids, not input.
-            let r = crate::views::add_field(ui, None, text, |t| crate::views::pickers::field(t, GOTO_HINT, p));
-            // The box keeps focus while open, so Enter counts whether or not the field just gave it up.
-            if (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                go = true;
-            } else {
-                r.request_focus();
-            }
-            // What the box takes, then which issue Enter opens, so the input is clear before acting.
-            let sp = theme::spacing(ui.ctx());
-            ui.add_space(sp.line_gap);
-            ui.label(RichText::new(goto_note(text, &project)).size(sp.small).color(crate::views::dialog_muted(p)));
-        });
-    });
-    if go {
-        app.actions.push(Action::GoTo);
-    }
-}
-
-pub const GOTO_TITLE: &str = "Go to issue";
-
-/// The line under the go-to box: what it accepts while empty, the issue Enter opens once the text is a key,
-/// number or browse link, else what to type instead.
-pub fn goto_note(text: &str, project: &str) -> String {
-    if text.trim().is_empty() {
-        return "Accepts a key, a number or a browse link.".to_string();
-    }
-    match crate::filter::parse_goto(text, project) {
-        Some(key) => format!("Enter opens {key}"),
-        None => format!("Not an issue key. Try {project}-9001, 9001 or a browse link."),
-    }
-}
-/// What the go-to field takes.
-const GOTO_HINT: &str = "Key, number or browse link (CI-9001, 9001)";
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1985,21 +1930,6 @@ mod tests {
         assert_eq!(parts, [("Unstick ", false), ("canary", true), (" deploys", false)]);
         assert_eq!(title_job("Plain", "zzz", theme::bold(13.5), &p, false).sections.len(), 1);
         assert_eq!(clear_slot_x(816.0).1, 816.0, "the clear button's text ends on the column edge");
-    }
-
-    #[test]
-    fn the_goto_note_says_what_it_accepts_and_opens() {
-        assert_eq!(goto_note("  ", "CI"), "Accepts a key, a number or a browse link.");
-        assert_eq!(goto_note("ci-9121", "CI"), "Enter opens CI-9121");
-        assert_eq!(goto_note("9121", "CI"), "Enter opens CI-9121");
-        assert_eq!(goto_note("https://x.atlassian.net/browse/CI-7", "CI"), "Enter opens CI-7");
-        assert_eq!(goto_note("canary", "CI"), "Not an issue key. Try CI-9001, 9001 or a browse link.");
-    }
-
-    #[test]
-    fn goto_and_pickers_share_one_modal() {
-        assert_eq!(crate::views::pickers::DIALOG_W, 440.0);
-        assert_eq!(crate::views::pickers::picker_top(900.0, None), crate::views::pickers::dialog_top(900.0));
     }
 
     #[test]
@@ -2617,8 +2547,22 @@ mod tests {
     #[cfg_attr(not(target_os = "macos"), ignore = "glyph-ink metrics are calibrated on macOS font rasterisation")]
     fn every_hint_key_is_drawn_mono() {
         use crate::keys::{HintContext::*, Tok, hints};
-        let all =
-            [Help, GoTo, Search, SearchText, SearchEmpty, Composer, EditPicker, AssignPicker, Picker, Selected, Browse, SignIn, SelectedSearch, BrowseSearch];
+        let all = [
+            Help,
+            Palette,
+            Search,
+            SearchText,
+            SearchEmpty,
+            Composer,
+            EditPicker,
+            AssignPicker,
+            Picker,
+            Selected,
+            Browse,
+            SignIn,
+            SelectedSearch,
+            BrowseSearch,
+        ];
         crate::testutil::with_ui(|ui| {
             ui.fonts_mut(|f| {
                 let mut adv = |c: char| f.glyph_width(&theme::key_font(), c);

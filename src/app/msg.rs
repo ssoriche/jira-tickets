@@ -27,6 +27,12 @@ pub enum Msg {
         key: String,
         result: jira::Result<Issue>,
     },
+    /// A ⌘K palette search: `query` is what it was sent for, `seq` which send (see `App::palette_seq`).
+    PaletteHits {
+        seq: u64,
+        query: String,
+        result: jira::Result<Vec<Issue>>,
+    },
     /// A write finished. `what` names it for the toast ("Transition", "Rank", …).
     Done {
         key: String,
@@ -240,6 +246,7 @@ impl App {
                     self.reload(id);
                 }
             }
+            Msg::PaletteHits { seq, query, result } => self.palette_answer(seq, query, result),
             Msg::Detail { key, result } => {
                 self.detail_loading.remove(&key);
                 match result {

@@ -35,8 +35,13 @@ pub enum Action {
     /// The box no longer holds a term: back to the scope's rows (the quick filter's or No team label's search
     /// is rerun, the team list needs no fetch). A no-op when something earlier this frame already ended it.
     EndTextSearch,
-    ToggleGoTo,
-    GoTo,
+    /// Opens or closes the ⌘K palette.
+    TogglePalette,
+    PaletteMove(i32),
+    /// Opens the palette's row under the cursor; `browser`: in Jira instead (⌘Enter).
+    PaletteConfirm {
+        browser: bool,
+    },
     Move(i32),
     Comment,
     OpenTransition,
@@ -221,7 +226,7 @@ impl App {
     }
 
     /// Switches to Issues with `key` selected, its row under the cursor when listed there.
-    fn open_in_issues(&mut self, key: String, ctx: &egui::Context) {
+    pub(super) fn open_in_issues(&mut self, key: String, ctx: &egui::Context) {
         self.apply(Action::SetScreen(Screen::Issues), ctx);
         if let Some(i) = views::issues::current_rows(self).iter().position(|i| i.key == key) {
             self.cursor = i;
@@ -323,9 +328,9 @@ impl App {
                     if s == Screen::Standup && !self.standup.types_fresh {
                         self.load_issue_types();
                     }
-                    // Go-to is drawn on Issues and the summary on Grooming only: neither outlives its screen, so
-                    // the hint bar and Esc agree with what is drawn.
-                    self.goto = None;
+                    // The summary is drawn on Grooming only, and the palette closes on a new screen: neither outlives
+                    // its screen, so the hint bar and Esc agree with what is drawn.
+                    self.palette = None;
                     self.grooming.summary_open = false;
                 }
                 self.screen = s;
@@ -551,18 +556,12 @@ impl App {
                 }
                 self.search(&jql);
             }
-            Action::ToggleGoTo => self.goto = if self.goto.is_some() { None } else { Some(String::new()) },
-            Action::GoTo => {
-                if let Some(text) = self.goto.take()
-                    && let Some(key) = crate::filter::parse_goto(&text, &self.cfg.scope.project)
-                {
-                    if let Some(i) = views::issues::current_rows(self).iter().position(|i| i.key == key) {
-                        self.cursor = i;
-                    }
-                    self.selected = Some(key.clone());
-                    self.load_detail(&key, false);
-                }
+            Action::TogglePalette => {
+                self.help_open = false;
+                self.palette = if self.palette.is_some() { None } else { Some(super::PaletteState::default()) };
             }
+            Action::PaletteMove(d) => self.palette_move(d),
+            Action::PaletteConfirm { browser } => self.palette_confirm(browser, ctx),
             Action::Move(delta) => {
                 let n = views::issues::current_rows(self).len();
                 if n == 0 {

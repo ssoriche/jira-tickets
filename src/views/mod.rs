@@ -9,6 +9,7 @@ pub mod help;
 pub mod icons;
 pub mod issues;
 pub mod me;
+pub mod palette;
 pub mod pickers;
 pub mod roadmap;
 pub mod standup;
