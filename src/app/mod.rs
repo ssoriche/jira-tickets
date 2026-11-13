@@ -13,8 +13,8 @@ mod standup;
 pub use actions::Action;
 pub use msg::Msg;
 pub use pickers::{
-    ASSIGN_USERS, POINTS_HINT, PRIORITY_HINT, Picker, assign_current_row, assign_cursor_after_filter, assign_matches, assign_note, assign_rows,
-    is_done_category, sprint_current_row, sprint_row_label, transition_row,
+    ASSIGN_USERS, POINTS_HINT, PRIORITY_HINT, Picker, assign_current_row, assign_cursor_after_filter, assign_empty_text, assign_matches, assign_note,
+    assign_rows, assign_search_term, is_done_category, sprint_current_row, sprint_row_label, transition_row,
 };
 
 pub use standup::{StandupPhase, StandupState, target_sprint};
@@ -246,6 +246,8 @@ pub struct App {
     pub search_active: bool,
     /// Bumped by every `RunSearch`; Search results from older runs are dropped.
     pub search_seq: u64,
+    /// Bumped by every Assign picker search of Jira; a reply under an older number is dropped.
+    pub assign_seq: u64,
     /// The seq of the search in flight; the list keeps its previous rows until it lands.
     pub search_pending: Option<u64>,
     /// The search in flight was rerun by a header refresh (⌘R), so the header spinner, not the count row, shows it.
@@ -381,6 +383,7 @@ impl App {
             last_cursor: 0,
             search_active: false,
             search_seq: 0,
+            assign_seq: 0,
             search_pending: None,
             search_from_refresh: false,
             detail_x: None,
@@ -704,6 +707,7 @@ impl eframe::App for App {
             self.track_screen_epics();
             views::main(self, ui);
             self.text_search_tick(&ctx);
+            self.assign_search_tick(&ctx);
             self.palette_tick(&ctx);
             views::pickers::show(self, &ctx);
             views::palette::show(self, &ctx);

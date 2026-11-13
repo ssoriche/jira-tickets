@@ -29,6 +29,8 @@ pub enum Picker {
         current: Option<User>,
         cursor: usize,
         filter: String,
+        /// Asking Jira for the names the list above does not have (`assign_search_term`).
+        search: AssignSearch,
     },
     Sprint {
         key: String,
@@ -99,6 +101,81 @@ impl Picker {
             | Picker::Assign { key, .. }
             | Picker::Sprint { key, .. }
             | Picker::Edit { key, .. } => key,
+        }
+    }
+}
+
+/// The Assign picker's Jira search: the picker opens on the people already known (`assign_seed`) and asks Jira
+/// only for a typed name that matches none of them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AssignSearch {
+    /// When the filter last changed; the search waits ASSIGN_SEARCH_DEBOUNCE after it.
+    pub edited: Option<std::time::Instant>,
+    /// The term last sent to Jira (asked once; its answer is merged into `items`).
+    pub asked: Option<String>,
+    /// The sequence number of the request in flight; a reply under another number is stale.
+    pub pending: Option<u64>,
+}
+
+/// How long the Assign filter waits after the last keystroke before asking Jira.
+pub const ASSIGN_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The term to ask Jira for: the trimmed filter, once it is at least two characters, matches nobody in the list,
+/// and has not been asked already.
+pub fn assign_search_term(filter: &str, local_matches: usize, asked: Option<&str>) -> Option<String> {
+    let t = filter.trim();
+    (t.chars().count() >= 2 && local_matches == 0 && asked != Some(t)).then(|| t.to_string())
+}
+
+/// The people the Assign picker opens on, with no request: you, then the team's members as the loaded tickets
+/// name them (config lists display names or account ids), then everyone else assigned or reporting on a loaded
+/// ticket, most often first. Each once.
+pub fn assign_seed<'a>(me: Option<&User>, members: &[String], issues: impl IntoIterator<Item = &'a jira::Issue>) -> Vec<User> {
+    let mut seen: Vec<(User, usize)> = Vec::new();
+    for u in issues.into_iter().flat_map(|i| [i.assignee.as_ref(), i.reporter.as_ref()]).flatten() {
+        if u.account_id.is_empty() {
+            continue;
+        }
+        match seen.iter_mut().find(|(s, _)| s.account_id == u.account_id) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((u.clone(), 1)),
+        }
+    }
+    let member = |u: &User| members.iter().any(|m| m == &u.account_id || m.eq_ignore_ascii_case(&u.display_name));
+    let mut out: Vec<User> = me.into_iter().cloned().collect();
+    let push = |u: &User, out: &mut Vec<User>| {
+        if !out.iter().any(|o| o.account_id == u.account_id) {
+            out.push(u.clone());
+        }
+    };
+    seen.sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.display_name.cmp(&b.display_name)));
+    for (u, _) in seen.iter().filter(|(u, _)| member(u)) {
+        push(u, &mut out);
+    }
+    for (u, _) in &seen {
+        push(u, &mut out);
+    }
+    out
+}
+
+/// The Assign picker's line (and hint) when the filter matches nobody: searching Jira, too short to search, or
+/// nobody in Jira either.
+pub fn assign_empty_text(filter: &str, searching: bool) -> (String, &'static str) {
+    let t = filter.trim();
+    if searching {
+        (format!("Searching Jira for “{t}”…"), "Anyone assignable in the project can be found.")
+    } else if t.chars().count() < 2 {
+        (format!("No one here matches “{t}”"), "Type another letter to search Jira.")
+    } else {
+        (format!("No people match “{t}”"), "Jira has no one assignable by that name either. Check the spelling.")
+    }
+}
+
+/// Adds Jira's answer to the list, keeping each person once and the list's order.
+pub fn merge_users(items: &mut Vec<User>, found: Vec<User>) {
+    for u in found {
+        if !items.iter().any(|o| o.account_id == u.account_id) {
+            items.push(u);
         }
     }
 }
@@ -180,10 +257,33 @@ impl App {
         if self.client.is_none() || self.picker_loading {
             return;
         }
-        self.picker_loading = true;
-        let project = self.cfg.scope.project.clone();
+        // Opens at once on the people already known; a typed name none of them has asks Jira (`assign_search_tick`).
+        let items = assign_seed(self.me.as_ref(), &self.cfg.team.members, self.store.issues.values());
+        let current = self.store.get(&key).and_then(|i| i.assignee.clone());
+        let cursor = assign_cursor_after_filter(&assign_rows(&items, "", current.as_ref()).0, "", current.is_some());
+        self.picker = Some(Picker::Assign { key, items, current, cursor, filter: String::new(), search: AssignSearch::default() });
+    }
+
+    /// Asks Jira for the Assign filter's name once typing pauses and the list has no match for it; the answer
+    /// (`Msg::Users`) joins the list.
+    pub(super) fn assign_search_tick(&mut self, ctx: &egui::Context) {
+        if self.client.is_none() {
+            return;
+        }
+        let Some(Picker::Assign { key, items, current, filter, search, .. }) = &mut self.picker else { return };
+        let Some(term) = assign_search_term(filter, assign_matches(items, filter, current.as_ref()), search.asked.as_deref()) else { return };
+        let since = search.edited.map_or(ASSIGN_SEARCH_DEBOUNCE, |t| t.elapsed());
+        if since < ASSIGN_SEARCH_DEBOUNCE {
+            ctx.request_repaint_after(ASSIGN_SEARCH_DEBOUNCE - since);
+            return;
+        }
+        self.assign_seq += 1;
+        let seq = self.assign_seq;
+        search.asked = Some(term.clone());
+        search.pending = Some(seq);
+        let (key, project) = (key.clone(), self.cfg.scope.project.clone());
         self.spawn(move |c, tx| {
-            let _ = tx.send(Msg::Users { key, result: c.assignable_users(&project) });
+            let _ = tx.send(Msg::Users { key, seq, result: c.assignable_users(&project, &term) });
         });
     }
 
@@ -271,7 +371,7 @@ impl App {
                     let _ = tx.send(Msg::Done { key: key.clone(), what, result: c.transition(&key, &transition_id, Some(&r.id)) });
                 });
             }
-            Picker::Assign { key, items, current, cursor, filter } => {
+            Picker::Assign { key, items, current, cursor, filter, .. } => {
                 let shown = assign_rows(&items, &filter, current.as_ref()).0;
                 // `changes` already kept the dialog open when nothing is selected.
                 let Some(account) = assign_choice(&shown, &filter, cursor) else { return };
@@ -618,6 +718,7 @@ mod tests {
             current,
             cursor,
             filter: filter.into(),
+            search: AssignSearch::default(),
         };
         assert!(!assign(1, Some(u("Ann")), "").changes("", None), "the pinned assignee");
         assert!(assign(0, Some(u("Ann")), "").changes("", None), "unassign");
@@ -702,6 +803,87 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("timed out");
+    }
+
+    fn person(id: &str, name: &str) -> User {
+        User { account_id: id.into(), display_name: name.into() }
+    }
+
+    fn assigned(key: &str, assignee: Option<User>, reporter: Option<User>) -> crate::jira::Issue {
+        crate::jira::Issue { key: key.into(), assignee, reporter, ..Default::default() }
+    }
+
+    #[test]
+    fn the_assign_seed_is_you_then_the_team_then_everyone_on_loaded_tickets_by_count() {
+        let (ann, bo, cy, dez) = (person("a", "Ann"), person("b", "Bo"), person("c", "Cy"), person("d", "Dez"));
+        let issues = [
+            assigned("CI-1", Some(bo.clone()), Some(cy.clone())),
+            assigned("CI-2", Some(cy.clone()), None),
+            assigned("CI-3", Some(dez.clone()), Some(ann.clone())),
+            assigned("CI-4", Some(person("", "Ghost")), None),
+        ];
+        // Dez is on the team by display name (any case), Bo by account id; Cy is on most tickets.
+        let members = ["dez".to_string(), "b".to_string(), "Never Seen".to_string()];
+        let names = |me: Option<&User>| assign_seed(me, &members, &issues).into_iter().map(|u| u.display_name).collect::<Vec<_>>();
+        assert_eq!(names(Some(&ann)), ["Ann", "Bo", "Dez", "Cy"], "you once, the team, then the rest; no id-less users");
+        assert_eq!(names(None), ["Bo", "Dez", "Cy", "Ann"]);
+    }
+
+    #[test]
+    fn jira_is_asked_only_for_an_unmatched_name_of_two_letters_once() {
+        assert_eq!(assign_search_term(" de ", 0, None).as_deref(), Some("de"));
+        assert_eq!(assign_search_term("d", 0, None), None, "one letter is too broad");
+        assert_eq!(assign_search_term("dez", 1, None), None, "the list already has a match");
+        assert_eq!(assign_search_term("dez", 0, Some("dez")), None, "already asked");
+        assert_eq!(assign_search_term("dezi", 0, Some("dez")).as_deref(), Some("dezi"));
+        assert_eq!(assign_empty_text("dez", true).0, "Searching Jira for “dez”…");
+        assert_eq!(assign_empty_text("d", false), ("No one here matches “d”".to_string(), "Type another letter to search Jira."));
+        assert_eq!(assign_empty_text("zed", false).0, "No people match “zed”");
+    }
+
+    #[test]
+    fn the_assign_picker_opens_on_known_people_and_adds_whom_jira_finds() {
+        let (base, rx) = crate::jira::tests::stub_server(vec![(
+            "GET",
+            "/rest/api/3/user/assignable/search",
+            serde_json::json!([{ "accountId": "d", "displayName": "Dez Ito" }]),
+        )]);
+        let cfg: crate::config::Config = toml::from_str("site = \"https://x.atlassian.net\"\nemail = \"a@b.c\"\n").unwrap();
+        let login = crate::auth::Login { email: "a@b.c".into(), token: "t".into(), source: crate::auth::Source::Env };
+        let mut app = App::for_test(cfg, Some(std::sync::Arc::new(crate::jira::Client::new(&base, &login))));
+        app.store.absorb(crate::store::ListId::TeamOpen, vec![assigned("CI-1", Some(person("a", "Ann")), None)]);
+        app.selected = Some("CI-1".into());
+        app.open_assign();
+        let names = |app: &App| match &app.picker {
+            Some(Picker::Assign { items, .. }) => items.iter().map(|u| u.display_name.clone()).collect::<Vec<_>>(),
+            _ => panic!("the Assign picker is open"),
+        };
+        assert_eq!(names(&app), ["Ann"], "open at once, no request");
+        assert!(rx.try_recv().is_err());
+        let ctx = egui::Context::default();
+        let type_filter = |app: &mut App, text: &str, ago: u64| {
+            if let Some(Picker::Assign { filter, search, .. }) = &mut app.picker {
+                *filter = text.into();
+                search.edited = Some(std::time::Instant::now() - std::time::Duration::from_millis(ago));
+            }
+        };
+        // Still typing: nothing is asked yet.
+        type_filter(&mut app, "dez", 0);
+        app.assign_search_tick(&ctx);
+        assert_eq!(app.assign_seq, 0);
+        // Typing paused: Jira is asked once, and Dez joins the list with the cursor on him.
+        type_filter(&mut app, "dez", 1000);
+        app.assign_search_tick(&ctx);
+        app.assign_search_tick(&ctx);
+        assert_eq!(app.assign_seq, 1, "asked once");
+        pump(&mut app, |a| matches!(&a.picker, Some(Picker::Assign { search, .. }) if search.pending.is_none()));
+        assert_eq!(names(&app), ["Ann", "Dez Ito"]);
+        assert!(matches!(&app.picker, Some(Picker::Assign { cursor: 1, .. })));
+        let paths: Vec<String> = rx.try_iter().map(|r| r.path).collect();
+        assert_eq!(paths, ["/rest/api/3/user/assignable/search?project=CI&query=dez&maxResults=50"]);
+        // A reply to an older request is dropped.
+        app.handle(Msg::Users { key: "CI-1".into(), seq: 0, result: Ok(vec![person("z", "Zed")]) });
+        assert_eq!(names(&app), ["Ann", "Dez Ito"]);
     }
 
     fn posts(rx: &std::sync::mpsc::Receiver<crate::jira::tests::Recorded>) -> Vec<serde_json::Value> {
