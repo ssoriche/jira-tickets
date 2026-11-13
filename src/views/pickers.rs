@@ -2,8 +2,8 @@
 //! Keys (↑/↓/j/k, Enter, Esc) are handled in `App::shortcuts`; this only draws.
 
 use crate::app::{
-    Action, App, Picker, assign_current_row, assign_cursor_after_filter, assign_matches, assign_note, assign_rows, sprint_current_row, sprint_row_label,
-    transition_row,
+    Action, App, Picker, assign_current_row, assign_cursor_after_filter, assign_empty_text, assign_matches, assign_note, assign_rows, assign_search_term,
+    sprint_current_row, sprint_row_label, transition_row,
 };
 use crate::theme::{self, Palette};
 use egui::{Frame, Margin, RichText, vec2};
@@ -52,7 +52,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     let below = title_with_note(ui, p, &if *close { format!("Close {key} as") } else { format!("Resolution for {key}") }, note);
                     rows(ui, p, items.iter().map(|r| Row::plain(r.name.clone())).collect(), live, &mut confirm, cursor, None, Some(below))
                 }
-                Picker::Assign { key, items, current, cursor, filter } => {
+                Picker::Assign { key, items, current, cursor, filter, search } => {
                     title_with_note(ui, p, &format!("Assign {key}"), note);
                     ui.add_space(TITLE_GAP);
                     let r = crate::views::add_field(ui, None, filter, |t| field_if(t, "Type a name", live, p));
@@ -64,13 +64,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     let (shown, cut) = assign_rows(items, filter, current.as_ref());
                     if r.changed() {
                         *cursor = assign_cursor_after_filter(&shown, filter, current.is_some());
+                        search.edited = Some(std::time::Instant::now());
                     }
                     if Picker::assign_empty(filter, shown.len()) {
                         // Nothing matched: no row is selected, so Enter cannot unassign.
                         can_confirm = false;
+                        let searching = search.pending.is_some() || assign_search_term(filter, 0, search.asked.as_deref()).is_some();
+                        let (message, hint) = assign_empty_text(filter, searching);
                         Frame::new().inner_margin(Margin::symmetric(ROW_INSET as i8, ROW_PAD_Y)).show(ui, |ui| {
-                            let message = format!("No people match “{}”", filter.trim());
-                            crate::views::components::empty_state(ui, p, &message, Some("Check the spelling, or clear the filter to see everyone."));
+                            crate::views::components::empty_state(ui, p, &message, Some(hint));
                         });
                         return_gap(ui)
                     } else {

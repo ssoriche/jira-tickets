@@ -57,6 +57,8 @@ pub enum Msg {
     /// `key` is the issue selected when the picker was asked for.
     Users {
         key: String,
+        /// `App::assign_seq` when asked; the picker drops an older reply.
+        seq: u64,
         result: jira::Result<Vec<User>>,
     },
     Sprints {
@@ -355,15 +357,20 @@ impl App {
                     Err(e) => self.toast(e.to_string(), true),
                 }
             }
-            Msg::Users { key, result } => {
-                self.picker_loading = false;
+            // The Assign picker's Jira search: joins the list of the picker that asked, if it is still open on that
+            // ticket and this is its latest request.
+            Msg::Users { key, seq, result } => {
+                let Some(Picker::Assign { key: open, items, current, cursor, filter, search }) = &mut self.picker else { return };
+                if *open != key || search.pending != Some(seq) {
+                    return;
+                }
+                search.pending = None;
                 match result {
-                    Ok(items) => {
-                        let current = self.store.get(&key).and_then(|i| i.assignee.clone());
-                        let cursor = assign_cursor_after_filter(&assign_rows(&items, "", current.as_ref()).0, "", current.is_some());
-                        self.picker = Some(Picker::Assign { key, items, current, cursor, filter: String::new() });
+                    Ok(found) => {
+                        super::pickers::merge_users(items, found);
+                        *cursor = assign_cursor_after_filter(&assign_rows(items, filter, current.as_ref()).0, filter, current.is_some());
                     }
-                    Err(e) => self.toast(e.to_string(), true),
+                    Err(e) => self.toast(format!("Couldn't search Jira for people: {e}"), true),
                 }
             }
             Msg::Sprints { key, result } => {

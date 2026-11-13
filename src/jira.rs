@@ -471,8 +471,11 @@ impl Client {
         out
     }
 
-    pub fn assignable_users(&self, project: &str) -> Result<Vec<User>> {
-        let v = self.get(&format!("/rest/api/3/user/assignable/search?project={project}&maxResults=100"))?;
+    /// The people assignable in `project` whose name or email matches `query` (Jira matches the start of each word),
+    /// at most 50: the Assign picker asks only when its own list has no match for what was typed.
+    pub fn assignable_users(&self, project: &str, query: &str) -> Result<Vec<User>> {
+        let path = format!("/rest/api/3/user/assignable/search?project={}&query={}&maxResults=50", urlencode(project), urlencode(query.trim()));
+        let v = self.get(&path)?;
         Ok(v.as_array().map(|a| a.iter().filter_map(user_at).collect()).unwrap_or_default())
     }
 
@@ -1086,6 +1089,17 @@ pub mod tests {
             paths,
             ["/rest/api/3/issue/createmeta/CI/issuetypes?startAt=0&maxResults=50", "/rest/api/3/issue/createmeta/CI/issuetypes?startAt=2&maxResults=50"]
         );
+    }
+
+    #[test]
+    fn assignable_users_ask_jira_for_the_typed_name() {
+        let u = |id: &str, name: &str| serde_json::json!({ "accountId": id, "displayName": name });
+        let (base, rx) = stub_server(vec![("GET", "/rest/api/3/user/assignable/search", serde_json::json!([u("d", "Dez Ito"), u("e", "Dezi Ray")]))]);
+        let got = client(&base).assignable_users("CI", "dez i").unwrap();
+        let names: Vec<&str> = got.iter().map(|u| u.display_name.as_str()).collect();
+        assert_eq!(names, ["Dez Ito", "Dezi Ray"]);
+        let paths: Vec<String> = rx.try_iter().map(|r| r.path).collect();
+        assert_eq!(paths, ["/rest/api/3/user/assignable/search?project=CI&query=dez%20i&maxResults=50"]);
     }
 
     #[test]
