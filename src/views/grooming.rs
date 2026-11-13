@@ -472,8 +472,12 @@ fn focused_ticket(app: &mut App, ui: &mut Ui, p: &Palette, issue: jira::Issue) {
         app.actions.push(Action::GroomFocusDetail(issue.key.clone()));
     }
     let g = &app.cfg.grooming;
-    rubric_card(ui, p, app.grooming.mode, &g.status_new, &g.status_planning, &g.status_ready, &app.cfg.scope.team_label);
-    ui.add_space(PANE_GAP - ui.spacing().item_spacing.y);
+    // Pre-check's readiness bar is what each verdict is judged against. The Session's keys are in the hint bar
+    // and its time box in the row's timer, so the ticket starts level with the queue's first row and gets the column.
+    if app.grooming.mode == GroomMode::PreCheck {
+        rubric_card(ui, p, app.grooming.mode, &g.status_new, &g.status_planning, &g.status_ready, &app.cfg.scope.team_label);
+        ui.add_space(PANE_GAP - ui.spacing().item_spacing.y);
+    }
     card(ui, p, |ui| {
         egui::ScrollArea::vertical().id_salt("groom-detail").auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -497,7 +501,11 @@ fn focused_ticket(app: &mut App, ui: &mut Ui, p: &Palette, issue: jira::Issue) {
             ui.add(egui::Label::new(RichText::new(&issue.summary).font(theme::bold(22.0)).color(p.text)).wrap());
             ui.add_space(8.0);
             let st = theme::status_tint(&issue.status.name, &issue.status.category, p, &app.cfg.issues.status_colors);
-            c::status_pill(ui, &issue.status.name, st);
+            ui.horizontal(|ui| {
+                c::status_pill(ui, &issue.status.name, st);
+                ui.add_space(8.0);
+                assignee_line(ui, p, &issue);
+            });
             description_header(ui, p, issue.description.as_ref());
             match &issue.description {
                 Some(d) => super::adf_view::show_value(ui, d, p, p.surface),
@@ -635,6 +643,22 @@ fn rubric_card(ui: &mut Ui, p: &Palette, mode: GroomMode, status_new: &str, stat
             }
         }
     });
+}
+
+/// The focused ticket's assignee beside its status: their avatar and name, or a muted "Unassigned".
+fn assignee_line(ui: &mut Ui, p: &Palette, issue: &jira::Issue) {
+    let size = theme::spacing(ui.ctx()).small;
+    match &issue.assignee {
+        Some(u) => {
+            let line_h = ui.painter().layout_no_wrap("Ag".into(), theme::body(size), p.text).size().y;
+            ui.spacing_mut().item_spacing.x = theme::AVATAR_GAP;
+            crate::avatar::inline(ui, Some(&u.account_id), &u.display_name, theme::AVATAR_PILL, line_h);
+            ui.label(RichText::new(&u.display_name).color(p.text).size(size));
+        }
+        None => {
+            ui.label(RichText::new("Unassigned").color(p.muted).size(size));
+        }
+    }
 }
 
 /// The dialogs over the Grooming screen: the overwrite confirm, else the summary.
@@ -1721,14 +1745,10 @@ mod tests {
             crate::testutil::inks(&shapes).into_iter().map(|(t, _)| t).collect::<Vec<_>>()
         };
         let t = texts(&mut app);
-        for want in [
-            "Decide",
-            "Ready for Work: accept and place it in rank.",
-            "Move a Ready for Work ticket down or up in rank.",
-            "Three to five minutes per ticket. Past that, bounce.",
-        ] {
-            assert!(t.iter().any(|x| x == want), "{want} in {t:?}");
-        }
+        // The focused ticket's assignee beside its status.
+        assert!(t.iter().any(|x| x == "Unassigned"), "{t:?}");
+        // No Decide card over the ticket: the hint bar lists the session's keys.
+        assert!(!t.iter().any(|x| x == "Decide" || x == "Ready for Work: accept and place it in rank."), "{t:?}");
         for want in [
             "Roadmap",
             "No epic",
@@ -1749,7 +1769,7 @@ mod tests {
         ] {
             assert!(t.iter().any(|x| x == want), "{want} in {t:?}");
         }
-        assert!(!t.iter().any(|x| x == "Unassigned"), "an assignee every row shares is not shown: {t:?}");
+        assert_eq!(t.iter().filter(|x| *x == "Unassigned").count(), 1, "an assignee every row shares is not shown on the rows, only in the pane: {t:?}");
         assert!(!t.iter().any(|x| x == "Ongoing" || x == "Other epics"), "stage headers only for stages with epics: {t:?}");
         app.grooming.placement = Some(0);
         let t = texts(&mut app);
